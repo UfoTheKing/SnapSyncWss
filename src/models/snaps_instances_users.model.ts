@@ -15,7 +15,7 @@ export class SnapsInstancesUsers
 {
   id!: number;
   snapInstanceId!: number;
-  snapInstanceShapePositionId!: number;
+  snapShapePositionId!: number;
   userId!: number;
 
   isOwner!: boolean;

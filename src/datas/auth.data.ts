@@ -5,3 +5,7 @@ export interface LoginData {
   deviceUuid: string;
   extWs: ExtWebSocket;
 }
+export interface LoginSystemData {
+  token: string;
+  extWs: ExtWebSocket;
+}

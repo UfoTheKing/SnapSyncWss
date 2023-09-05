@@ -6,16 +6,27 @@ import {
 } from "@/dtos/snaps_instances_users.dto";
 import { HttpException } from "@/exceptions/HttpException";
 import { SnapInstance } from "@/interfaces/snaps_instances.interface";
-import { SnapsInstancesShapes } from "@/models/snaps_instances_shapes.model";
-import { SnapsInstancesShapesPositions } from "@/models/snaps_instances_shapes_positions.model";
 import { Users } from "@/models/users.model";
 import FriendService from "./friends.service";
 import { SnapsInstances } from "@/models/snaps_instances.model";
 import { SnapsInstancesUsers } from "@/models/snaps_instances_users.model";
 import sha256 from "crypto-js/sha256";
 import { boolean } from "boolean";
+import { SnapsShapes } from "@/models/snaps_shapes.model";
+import { SnapsShapesPositions } from "@/models/snaps_shapes_positions.model";
 
 class SnapInstanceService {
+  public async findSnapInstanceByKey(key: string): Promise<SnapInstance> {
+    const findSnapInstance = await SnapsInstances.query()
+      .whereNotDeleted()
+      .andWhere({ instanceKey: key })
+      .first();
+    if (!findSnapInstance)
+      throw new HttpException(404, "Snap instance not found.");
+
+    return findSnapInstance;
+  }
+
   public async createSnapInstance(
     data: CreateSnapInstaceDto
   ): Promise<SnapInstance> {
@@ -24,22 +35,22 @@ class SnapInstanceService {
       .findById(data.userId);
     if (!findUser) throw new HttpException(404, `User not found.`);
 
-    const shape = await SnapsInstancesShapes.query()
+    const shape = await SnapsShapes.query()
       .whereNotDeleted()
-      .findById(data.snapInstanceShapeId);
+      .findById(data.snapShapeId);
     if (!shape) throw new HttpException(404, "Shape not found.");
 
     // Recupero la posizione che andrà assegnata all'owner
-    const ownerPosition = await SnapsInstancesShapesPositions.query()
+    const ownerPosition = await SnapsShapesPositions.query()
       .whereNotDeleted()
-      .findOne({ snapInstanceShapeId: shape.id, ownerPosition: true });
+      .findOne({ snapShapeId: shape.id, ownerPosition: true });
     if (!ownerPosition)
       throw new HttpException(500, "Ops! Something went wrong.");
 
     // Recupero le altre posizioni
-    const otherPositions = await SnapsInstancesShapesPositions.query()
+    const otherPositions = await SnapsShapesPositions.query()
       .whereNotDeleted()
-      .where({ snapInstanceShapeId: shape.id, ownerPosition: false });
+      .where({ snapShapeId: shape.id, ownerPosition: false });
     if (shape.numberOfUsers !== otherPositions.length + 1)
       throw new HttpException(500, "Ops! Something went wrong.");
 
@@ -69,7 +80,7 @@ class SnapInstanceService {
     usersDto.push({
       userId: findUser.id,
       snapInstanceId: -1, // Lo sistemiamo dopo
-      snapInstanceShapePositionId: ownerPosition.id,
+      snapShapePositionId: ownerPosition.id,
       isOwner: true,
       isJoined: true,
       joinedAt: new Date(),
@@ -115,7 +126,7 @@ class SnapInstanceService {
       usersDto.push({
         userId: userId,
         snapInstanceId: -1, // Lo sistemiamo dopo
-        snapInstanceShapePositionId: SnapInstanceShapePosition.id,
+        snapShapePositionId: SnapInstanceShapePosition.id,
         isOwner: false,
       });
     }
@@ -124,9 +135,9 @@ class SnapInstanceService {
 
     try {
       const createdSnapInstance = await SnapsInstances.query(trx).insert({
-        userId: data.userId,
-        snapInstanceShapeId: data.snapInstanceShapeId,
-        hashedKey: data.hashedKey,
+        userId: findUser.id,
+        snapShapeId: shape.id,
+        instanceKey: data.key,
       });
 
       // Sistemo i dtos
@@ -149,23 +160,18 @@ class SnapInstanceService {
 
   public async joinUserToSnapInstance(
     data: JoinUserToSnapInstanceDto
-  ): Promise<boolean> {
+  ): Promise<void> {
     const findUser = await Users.query()
       .whereNotDeleted()
       .findById(data.userId);
     if (!findUser) throw new HttpException(404, "User not found.");
 
-    const hashedKey = this.hashSnapInstanceKey(data.key);
-    const findSnapInstance = await SnapsInstances.query()
-      .whereNotDeleted()
-      .findOne({ hashedKey: hashedKey });
-    if (!findSnapInstance)
-      throw new HttpException(404, "Snap instance not found.");
+    const findSnapInstance = await this.findSnapInstanceByKey(data.key);
 
     // Recupero la shape
-    const shape = await SnapsInstancesShapes.query()
+    const shape = await SnapsShapes.query()
       .whereNotDeleted()
-      .findById(findSnapInstance.snapInstanceShapeId);
+      .findById(findSnapInstance.snapShapeId);
     if (!shape) throw new HttpException(404, "Shape not found.");
 
     // Controllo se l'utente può entrare nella snap instance
@@ -200,13 +206,12 @@ class SnapInstanceService {
         joinedAt: new Date(),
       });
 
-    let timerStarted = false;
-
     // Controllo se tutti gli utenti sono entrati
     const countJoinedUsers = await SnapsInstancesUsers.query()
       .whereNotDeleted()
       .andWhere({ snapInstanceId: findSnapInstance.id, isJoined: true })
       .resultSize();
+
     if (countJoinedUsers === shape.numberOfUsers) {
       // Devo aggiornare il record nella tabella snaps_instances
       await SnapsInstances.query()
@@ -214,12 +219,10 @@ class SnapInstanceService {
         .findById(findSnapInstance.id)
         .update({
           timerStarted: true,
+
+          timerStartAt: new Date(),
         });
-
-      timerStarted = true;
     }
-
-    return timerStarted;
   }
 
   public async leaveUserFromSnapInstance(
@@ -229,13 +232,7 @@ class SnapInstanceService {
       .whereNotDeleted()
       .findById(data.userId);
     if (!findUser) throw new HttpException(404, "User not found.");
-
-    const hashedKey = this.hashSnapInstanceKey(data.key);
-    const findSnapInstance = await SnapsInstances.query()
-      .whereNotDeleted()
-      .findOne({ hashedKey: hashedKey });
-    if (!findSnapInstance)
-      throw new HttpException(404, "Snap instance not found.");
+    const findSnapInstance = await this.findSnapInstanceByKey(data.key);
 
     // Controllo se effettivamente l'utente è entrato
     const snapInstanceUser = await SnapsInstancesUsers.query()
@@ -268,7 +265,7 @@ class SnapInstanceService {
       await trx.commit();
     } catch (error) {
       await trx.rollback();
-      throw new HttpException(500, "Ops! Something went wrong.");
+      throw error;
     }
   }
 
@@ -277,22 +274,18 @@ class SnapInstanceService {
     plainTextKey: string
   ): Promise<void> {
     // Recupero l'istanza nel db
-    const hashedKey = this.hashSnapInstanceKey(plainTextKey);
-    const findSnapInstance = await SnapsInstances.query()
-      .whereNotDeleted()
-      .findOne({ hashedKey: hashedKey });
-    if (!findSnapInstance)
-      throw new HttpException(404, "Snap instance not found.");
+    const findSnapInstance = await this.findSnapInstanceByKey(plainTextKey);
 
     const findUser = await Users.query().whereNotDeleted().findById(userId);
     if (!findUser) throw new HttpException(404, "User not found.");
 
     // Controllo se l'utente è il proprietario
-    if (findSnapInstance.userId !== findUser.id)
+    if (findSnapInstance.userId !== findUser.id) {
       throw new HttpException(
         403,
-        "You are not the owner of this snap instance."
+        "You can't delete this snap instance because you are not the owner."
       );
+    }
 
     const trx = await SnapsInstances.startTransaction();
 
@@ -308,12 +301,14 @@ class SnapInstanceService {
       await trx.commit();
     } catch (error) {
       await trx.rollback();
-      throw new HttpException(500, "Ops! Something went wrong.");
+      throw error;
     }
   }
 
-  public hashSnapInstanceKey(key: string): string {
-    return sha256(key).toString();
+  public generateKey(): string {
+    let key = sha256(new Date().getTime().toString()).toString();
+
+    return key;
   }
 }
 

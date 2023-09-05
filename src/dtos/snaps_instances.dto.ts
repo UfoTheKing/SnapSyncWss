@@ -1,8 +1,8 @@
 export interface CreateSnapInstaceDto {
   userId: number;
-  snapInstanceShapeId: number;
+  snapShapeId: number;
 
-  hashedKey: string;
+  key: string;
 
   users: Array<{
     id: number;

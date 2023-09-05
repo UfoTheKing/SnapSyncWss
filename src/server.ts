@@ -6,7 +6,7 @@ import { Model } from "objection";
 import knex from "@databases";
 import { User } from "@/interfaces/users.interface";
 import SnapsInstancesController from "./controllers/snaps_instaces.controller";
-import { LoginData } from "./datas/auth.data";
+import { LoginData, LoginSystemData } from "./datas/auth.data";
 import { Device } from "./interfaces/devices.interface";
 import AuthController from "./controllers/auth.controller";
 import * as yup from "yup";
@@ -22,6 +22,10 @@ const wss = new WebSocket.Server({ server });
 
 export interface ExtWebSocket extends WebSocket {
   isAlive: boolean;
+
+  system?: boolean;
+  token?: string;
+
   snapsInstanceKey?: string;
   user?: User;
   device?: Device;
@@ -62,10 +66,6 @@ function createErrorMessage(
   );
 }
 
-export interface DataStoredInToken {
-  id: number;
-}
-
 export class SystemMessage {
   constructor(
     public success: boolean,
@@ -92,10 +92,10 @@ export class SystemErrorMessage {
 
 export class UserMessage {
   constructor(
-    public token: string,
-    public deviceUuid: string | null,
     public action: string,
-    public data: any
+    public token?: string,
+    public deviceUuid?: string,
+    public data?: any
   ) {}
 }
 
@@ -116,13 +116,13 @@ wss.on("connection", (ws: WebSocket) => {
     var action = "GENERIC";
     try {
       const message = JSON.parse(msg) as UserMessage;
-      if (!message.token) throw new Error("No token provided");
-
       if (!message.action) throw new Error("No action provided");
+      // if (!message.token) throw new Error("No token provided");
 
       switch (message.action) {
         case "LOGIN": {
-          if (!message.deviceUuid) throw new Error("No deviceUuid provided");
+          if (!message.deviceUuid) throw new HttpException(401, "Unauthorized");
+          if (!message.token) throw new HttpException(401, "Unauthorized");
 
           action = "LOGIN";
           // Controllo se è già loggato
@@ -143,8 +143,26 @@ wss.on("connection", (ws: WebSocket) => {
           extWs.user = user;
           extWs.device = device;
           extWs.sessionId = sessionId;
+          extWs.token = message.token;
 
           ws.send(createMessage(true, "User logged", "LOGIN", { sessionId }));
+
+          break;
+        }
+        case "LOGIN_SYSTEM": {
+          action = "LOGIN_SYSTEM";
+          if (!message.token) throw new HttpException(401, "Unauthorized");
+
+          let data: LoginSystemData = {
+            token: message.token,
+            extWs: extWs,
+          };
+          await authController.loginSystem(data);
+
+          extWs.system = true;
+          extWs.token = message.token;
+
+          ws.send(createMessage(true, "System logged", "LOGIN_SYSTEM"));
 
           break;
         }
@@ -171,27 +189,19 @@ wss.on("connection", (ws: WebSocket) => {
         }
         case "CREATE_SNAP_INSTANCE": {
           action = "CREATE_SNAP_INSTANCE";
-          if (!extWs.device) throw new HttpException(401, "Unauthorized", null);
+          if (!extWs.device) throw new HttpException(401, "Unauthorized");
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
           const isLogged = await authController.isLogged(
-            message.token,
+            extWs.token,
             extWs.device.uuid
           );
-          if (!isLogged) throw new Error("User not logged");
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
 
-          const key = await controller.CreateSnapInstance(
-            message.data,
-            extWs,
-            extWs.user,
-            extWs.device
-          );
+          const key = await controller.CreateSnapInstance(message.data, extWs);
           extWs.snapsInstanceKey = key;
 
-          const clients = await controller.GetSnapInstanceClients(
-            extWs.user,
-            extWs.device,
-            extWs
-          );
-          const data = await controller.GetSnapInstance(key, extWs.user);
+          const clients = await controller.GetSnapInstanceClients(key);
+          const data = await controller.GetSnapInstance(key);
 
           const clientsArray = Array.from(clients);
 
@@ -212,18 +222,25 @@ wss.on("connection", (ws: WebSocket) => {
         }
         case "DELETE_SNAP_INSTANCE": {
           action = "DELETE_SNAP_INSTANCE";
-          if (!extWs.device) throw new HttpException(401, "Unauthorized", null);
+          if (!extWs.device) throw new HttpException(401, "Unauthorized");
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+
           const isLogged = await authController.isLogged(
-            message.token,
+            extWs.token,
             extWs.device.uuid
           );
-          if (!isLogged) throw new Error("User not logged");
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
 
-          const clients = await controller.DeleteSnapInstance(
-            extWs.user,
-            extWs.device,
-            extWs
+          if (!extWs.snapsInstanceKey)
+            throw new HttpException(403, "Forbidden");
+
+          let copyOfYheKey = extWs.snapsInstanceKey;
+
+          const clients = await controller.GetSnapInstanceClients(
+            extWs.snapsInstanceKey
           );
+
+          await controller.DeleteSnapInstance(extWs);
 
           const clientsArray = Array.from(clients);
 
@@ -231,9 +248,10 @@ wss.on("connection", (ws: WebSocket) => {
 
           clientsArray.forEach((client) => {
             let clientWs = client[1];
+            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
             clientWs.send(
               createMessage(true, `SnapSync deleted`, "DELETE_SNAP_INSTANCE", {
-                key: message.data.key,
+                key: copyOfYheKey,
                 exit: true,
               })
             );
@@ -244,32 +262,22 @@ wss.on("connection", (ws: WebSocket) => {
         case "JOIN_SNAP_INSTANCE": {
           action = "JOIN_SNAP_INSTANCE";
           if (!extWs.device) throw new HttpException(401, "Unauthorized");
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
 
           const isLogged = await authController.isLogged(
-            message.token,
+            extWs.token,
             extWs.device.uuid
           );
-          if (!isLogged) throw new Error("User not logged");
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
 
-          await controller.JoinSnapInstance(
-            message.data,
-
-            extWs.user,
-            extWs.device,
-            extWs
-          );
+          await controller.JoinSnapInstance(message.data, extWs);
 
           extWs.snapsInstanceKey = message.data.key;
 
           const clients = await controller.GetSnapInstanceClients(
-            extWs.user,
-            extWs.device,
-            extWs
+            message.data.key
           );
-          const data = await controller.GetSnapInstance(
-            message.data.key,
-            extWs.user
-          );
+          const data = await controller.GetSnapInstance(message.data.key);
 
           const clientsArray = Array.from(clients);
 
@@ -285,27 +293,33 @@ wss.on("connection", (ws: WebSocket) => {
         case "LEAVE_SNAP_INSTANCE": {
           action = "LEAVE_SNAP_INSTANCE";
           if (!extWs.device) throw new HttpException(401, "Unauthorized");
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
 
           const isLogged = await authController.isLogged(
-            message.token,
+            extWs.token,
             extWs.device.uuid
           );
-          if (!isLogged) throw new Error("User not logged");
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
 
-          const clients = await controller.LeaveSnapInstance(
-            message.data,
+          if (!extWs.snapsInstanceKey)
+            throw new HttpException(403, "Forbidden");
 
-            extWs.user,
-            extWs.device,
-            extWs
+          const clients = await controller.GetSnapInstanceClients(
+            extWs.snapsInstanceKey
           );
+
+          await controller.LeaveSnapInstance(extWs);
+
           const clientsArray = Array.from(clients);
+          let copyOfTheKey = extWs.snapsInstanceKey;
+          extWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
 
           clientsArray.forEach((client) => {
             let clientWs = client[1];
+            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
             clientWs.send(
               createMessage(true, `User Left`, "LEAVE_SNAP_INSTANCE", {
-                key: message.data.key,
+                key: copyOfTheKey,
                 exit: true,
               })
             );
@@ -313,11 +327,105 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "TAKE_SNAP": {
-          action = "TAKE_PHOTO";
-          console.log("TAKE_PHOTO");
+        case "SEND_SNAP": {
+          action = "SEND_SNAP";
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+          if (!extWs.system) throw new HttpException(401, "Unauthorized");
+          if (!message.data) throw new HttpException(400, "Bad request");
+
+          if (!message.data.key) throw new HttpException(400, "Bad request");
+          if (!message.data.image) throw new HttpException(400, "Bad request");
+
+          // Controllare se il system è loggato
+          let isLogged = await authController.isLoggedSystem(extWs.token);
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
+
+          // Recupero i client connessi
+          const clients = await controller.GetSnapInstanceClients(
+            message.data.key
+          );
+          const clientsArray = Array.from(clients);
+
+          clientsArray.forEach((client) => {
+            let clientWs = client[1];
+            clientWs.send(
+              createMessage(true, `Snap received`, "SEND_SNAP", {
+                key: message.data.key,
+                image: message.data.image,
+                timer: {
+                  minutes: 0,
+                  seconds: 20,
+                },
+              })
+            );
+          });
+
+          ws.send(createMessage(true, `Snap sent`, "SEND_SNAP"));
 
           break;
+        }
+        case "ERROR_SNAP": {
+          action = "ERROR_SNAP";
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+          if (!extWs.system) throw new HttpException(401, "Unauthorized");
+          if (!message.data) throw new HttpException(400, "Bad request");
+
+          if (!message.data.key) throw new HttpException(400, "Bad request");
+
+          // Controllare se il system è loggato
+          let isLogged = await authController.isLoggedSystem(extWs.token);
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
+
+          // Recupero i client connessi
+          const clients = await controller.GetSnapInstanceClients(
+            message.data.key
+          );
+          const clientsArray = Array.from(clients);
+
+          // Elimino la SnapInstance
+          await controller.DeleteSnapInstanceSystem(message.data.key);
+
+          clientsArray.forEach((client) => {
+            let clientWs = client[1];
+            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+            clientWs.send(
+              createMessage(true, `SnapSync deleted`, action, {
+                key: message.data.key,
+                exit: true,
+              })
+            );
+          });
+        }
+        case "PUBLISH_SNAP": {
+          action = "PUBLISH_SNAP";
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+          if (!extWs.system) throw new HttpException(401, "Unauthorized");
+          if (!message.data) throw new HttpException(400, "Bad request");
+
+          if (!message.data.key) throw new HttpException(400, "Bad request");
+
+          // Controllare se il system è loggato
+          let isLogged = await authController.isLoggedSystem(extWs.token);
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
+
+          // Recupero i client connessi
+          const clients = await controller.GetSnapInstanceClients(
+            message.data.key
+          );
+          const clientsArray = Array.from(clients);
+
+          await controller.DeleteSnapInstanceSystem(message.data.key);
+
+          clientsArray.forEach((client) => {
+            let clientWs = client[1];
+            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+            clientWs.send(
+              createMessage(true, `SnapSync published`, action, {
+                key: message.data.key,
+                exit: true,
+              })
+            );
+          });
         }
         default: {
           ws.send(createMessage(false, "Action not found"));
@@ -368,29 +476,24 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", async (e) => {
     try {
-      if (extWs.user && extWs.device && extWs.sessionId) {
-        const r = await controller.ConnectionClosed(extWs, extWs.user);
+      const r = await controller.ConnectionClosed(extWs);
 
-        // Lo rimuovo dalla mappa
-        await authController.logout(
-          extWs.user.id,
-          extWs.device.uuid,
-          extWs.sessionId
-        );
-
-        extWs.user = undefined;
-        extWs.device = undefined;
-        extWs.sessionId = undefined;
-        extWs.snapsInstanceKey = undefined;
-
-        if (r) {
-          let clientsArray = Array.from(r.clients);
-          clientsArray.forEach((client) => {
-            let clientWs = client[1];
-            clientWs.send(JSON.stringify(r.message));
-          });
-        }
+      if (r) {
+        let clientsArray = Array.from(r.clients);
+        clientsArray.forEach((client) => {
+          let clientWs = client[1];
+          clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+          clientWs.send(JSON.stringify(r.message));
+        });
       }
+
+      // Lo rimuovo dalla mappa
+      await authController.logout(extWs);
+
+      extWs.user = undefined;
+      extWs.device = undefined;
+      extWs.sessionId = undefined;
+      extWs.snapsInstanceKey = undefined;
     } catch (error) {
       console.log(error);
     }
@@ -403,10 +506,6 @@ wss.on("close", () => {
 
 wss.on("error", (err) => {
   console.log(err);
-});
-
-server.on("upgrade", (request, socket, head) => {
-  console.log("Parsing session from request...");
 });
 
 setInterval(() => {

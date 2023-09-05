@@ -1,15 +1,15 @@
-import { Model, ModelObject, Pojo } from 'objection';
-import objectionSoftDelete from 'objection-js-soft-delete';
-import { SnapInstanceShape } from '@/interfaces/snaps_instances_shapes.interface';
+import { SnapShape } from "@/interfaces/snaps_shapes.interface";
+import { Model, ModelObject, Pojo } from "objection";
+import objectionSoftDelete from "objection-js-soft-delete";
 
 // Specify the options for this plugin. This are the defaults.
 const softDelete = objectionSoftDelete({
-  columnName: 'deletedAt',
+  columnName: "deletedAt",
   deletedValue: new Date(),
   notDeletedValue: null,
 });
 
-export class SnapsInstancesShapes extends softDelete(Model) implements SnapInstanceShape {
+export class SnapsShapes extends softDelete(Model) implements SnapShape {
   id!: number;
   name!: string;
   numberOfUsers!: number;
@@ -22,8 +22,8 @@ export class SnapsInstancesShapes extends softDelete(Model) implements SnapInsta
   deletedAt!: Date | null;
   unarchived!: boolean;
 
-  static tableName = 'snaps_instances_shapes';
-  static idColumn = 'id';
+  static tableName = "snaps_shapes";
+  static idColumn = "id";
 
   $formatJson(json: Pojo): Pojo {
     const formattedJson = super.$formatJson(json);
@@ -37,4 +37,4 @@ export class SnapsInstancesShapes extends softDelete(Model) implements SnapInsta
   }
 }
 
-export type SnapsInstancesShapesShape = ModelObject<SnapsInstancesShapes>;
+export type SnapsShapesShape = ModelObject<SnapsShapes>;

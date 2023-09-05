@@ -1,6 +1,6 @@
 import { Model, ModelObject, Pojo } from "objection";
 import objectionSoftDelete from "objection-js-soft-delete";
-import { SnapInstanceShapePosition } from "@/interfaces/snaps_instances_shapes_positions.interface";
+import { SnapShapePosition } from "@/interfaces/snaps_shapes_positions.interface";
 
 // Specify the options for this plugin. This are the defaults.
 const softDelete = objectionSoftDelete({
@@ -9,12 +9,12 @@ const softDelete = objectionSoftDelete({
   notDeletedValue: null,
 });
 
-export class SnapsInstancesShapesPositions
+export class SnapsShapesPositions
   extends softDelete(Model)
-  implements SnapInstanceShapePosition
+  implements SnapShapePosition
 {
   id!: number;
-  snapInstanceShapeId!: number;
+  snapShapeId!: number;
   name!: string;
 
   createdAt!: Date;
@@ -24,9 +24,8 @@ export class SnapsInstancesShapesPositions
 
   ownerPosition!: boolean;
 
-  static tableName = "snaps_instances_shapes_positions";
+  static tableName = "snaps_shapes_positions";
   static idColumn = "id";
 }
 
-export type SnapsInstancesShapesPositionsShape =
-  ModelObject<SnapsInstancesShapesPositions>;
+export type SnapsShapesPositionsShape = ModelObject<SnapsShapesPositions>;

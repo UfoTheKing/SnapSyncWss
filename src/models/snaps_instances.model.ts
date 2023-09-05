@@ -12,12 +12,13 @@ const softDelete = objectionSoftDelete({
 export class SnapsInstances extends softDelete(Model) implements SnapInstance {
   id!: number;
   userId!: number;
-  snapInstanceShapeId!: number;
-  hashedKey!: string;
+  snapShapeId!: number;
+  instanceKey!: string;
 
   timerStarted!: boolean;
   timerDurationMinutes!: number;
   timerDurationSeconds!: number;
+  timerStartAt!: Date | null;
 
   imageKey!: string | null;
 

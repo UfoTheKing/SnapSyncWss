@@ -1,26 +1,9 @@
-import {
-  CreateSnapInstaceUserData,
-  CreateSnapInstanceData,
-  DeleteSnapInstanceData,
-  GetSnapInstanceClientsData,
-  GetSnapInstanceData,
-  JoinSnapInstanceData,
-  LeaveSnapInstanceData,
-} from "@/datas/snaps_instances.data";
 import { Device } from "@/interfaces/devices.interface";
 import { User } from "@/interfaces/users.interface";
 import { SnapsInstances } from "@/models/snaps_instances.model";
-import { SnapsInstancesShapes } from "@/models/snaps_instances_shapes.model";
 import { SnapsInstancesUsers } from "@/models/snaps_instances_users.model";
 import { ExtWebSocket, SystemMessage } from "@/server";
-import sha256 from "crypto-js/sha256";
 import * as yup from "yup";
-import { v4 as uuidv4 } from "uuid";
-import { SnapsInstancesShapesPositions } from "@/models/snaps_instances_shapes_positions.model";
-import { Users } from "@/models/users.model";
-import { BlockedUsers } from "@/models/blocked_users.model";
-import { Friends } from "@/models/friends.model";
-import { FriendshipStatuses } from "@/models/friendship_statuses.model";
 import { HttpException } from "@/exceptions/HttpException";
 import { boolean } from "boolean";
 import SnapInstanceService from "@/services/snaps_instances.service";
@@ -30,12 +13,14 @@ import {
   JoinUserToSnapInstanceDto,
   LeaveUserToSnapInstanceDto,
 } from "@/dtos/snaps_instances_users.dto";
+import SnapShapeService from "@/services/snaps_shapes.service";
+import SnapInstanceUserService from "@/services/snaps_instances_users.service";
+import SnapShapePositionService from "@/services/snaps_shapes_positions.service";
 
 class ClassSnapInstance {
   public key: string;
   public clients: Map<number, ExtWebSocket> = new Map(); // UserId, Client
   public model: SnapInstance;
-  public startTime: Date | null = null;
 
   constructor(key: string, model: SnapInstance) {
     this.key = key;
@@ -62,10 +47,6 @@ class ClassSnapInstance {
 
     // La elimino
     this.clients.delete(userId);
-  }
-
-  public async startTimer(): Promise<void> {
-    this.startTime = new Date();
   }
 }
 
@@ -152,38 +133,31 @@ class ClassSnapsInstances {
     // Provo a trovare il client
     return instance.clients;
   }
-
-  public async startTimer(key: string): Promise<void> {
-    // Controllo se esiste già un'istanza con la stessa chiave
-    const instance = this.instances.get(key);
-    if (!instance) throw new Error("Snap instance not found.");
-
-    // Provo a trovare il client
-    instance.startTimer();
-  }
 }
 
 class SnapsInstancesController {
   public snapsInstances: ClassSnapsInstances = new ClassSnapsInstances();
   public snapInstanceService = new SnapInstanceService();
+  public snapShapeService = new SnapShapeService();
+  public snapInstanceUserService = new SnapInstanceUserService();
+  public snapShapePositionService = new SnapShapePositionService();
 
   public async CreateSnapInstance(
     data: any,
-    client: ExtWebSocket,
-    user: User | undefined,
-    device: Device | undefined
+    client: ExtWebSocket
   ): Promise<string> {
     if (!data) throw new HttpException(400, "Data is missing.");
-    if (!user || !device) throw new HttpException(401, "Unauthorized");
+    if (!client.user || !client.device)
+      throw new HttpException(401, "Unauthorized");
 
     // Se l'utente ha già una snap instance, non può crearne un'altra
     if (client.snapsInstanceKey)
-      throw new HttpException(400, "You are already in a snap instance.");
+      throw new HttpException(409, "You are already in a snap instance.");
 
     const typedData = data as CreateSnapInstaceDto;
 
     const validationSchema = yup.object().shape({
-      snapInstanceShapeId: yup.number().required(),
+      snapShapeId: yup.number().required(),
       users: yup
         .array()
         .of(
@@ -197,58 +171,51 @@ class SnapsInstancesController {
 
     await validationSchema.validate(typedData, { abortEarly: false });
 
-    const plainTextKey = uuidv4();
-    const hashedKey =
-      this.snapInstanceService.hashSnapInstanceKey(plainTextKey);
-    typedData.userId = user.id;
-    typedData.hashedKey = hashedKey;
+    // String 64 chars
+    const key = await this.snapInstanceService.generateKey();
+    typedData.userId = client.user.id;
+    typedData.key = key;
 
     const snapInstance = await this.snapInstanceService.createSnapInstance(
       typedData
     );
 
     // Creo l'istanza
-    await this.snapsInstances.createInstance(plainTextKey, snapInstance);
+    await this.snapsInstances.createInstance(key, snapInstance);
 
     // Lo aggiungo alla lista
     await this.snapsInstances.addClientToInstance(
-      plainTextKey,
-      user.id,
+      key,
+      typedData.userId,
       client
     );
 
-    return plainTextKey;
+    return key;
   }
 
-  public async DeleteSnapInstance(
-    user: User | undefined,
-    device: Device | undefined,
-    client: ExtWebSocket
-  ): Promise<Map<number, ExtWebSocket>> {
-    if (!user || !device) throw new HttpException(401, "Unauthorized");
+  public async DeleteSnapInstance(client: ExtWebSocket): Promise<void> {
+    if (!client.user || !client.device)
+      throw new HttpException(401, "Unauthorized");
     if (!client.snapsInstanceKey) throw new HttpException(400, "Bad request");
 
     const key = client.snapsInstanceKey;
 
-    await this.snapInstanceService.deleteSnapInstanceFromKey(user.id, key);
-
-    // Recupero i client connessi prima di eliminare l'istanza
-    const clients = await this.snapsInstances.findClientsInInstance(key);
+    await this.snapInstanceService.deleteSnapInstanceFromKey(
+      client.user.id,
+      key
+    );
 
     // La elimino
     await this.snapsInstances.deleteInstance(key);
-
-    return clients;
   }
 
   public async JoinSnapInstance(
     data: any,
-    user: User | undefined,
-    device: Device | undefined,
     client: ExtWebSocket
   ): Promise<void> {
     if (!data) throw new HttpException(400, "Data is missing.");
-    if (!user || !device) throw new HttpException(401, "Unauthorized");
+    if (!client.user || !client.device)
+      throw new HttpException(401, "Unauthorized");
     if (client.snapsInstanceKey)
       throw new HttpException(400, "Bad request", null);
 
@@ -256,122 +223,74 @@ class SnapsInstancesController {
     if (!typedData.key) throw new HttpException(400, "Bad request");
 
     const key = typedData.key;
-    typedData.userId = user.id;
+    typedData.userId = client.user.id;
 
     // Controllo se esiste già un'istanza con la stessa chiave nelle SnapInstances
     const instance = await this.snapsInstances.findInstanceByKey(key);
     if (!instance) throw new HttpException(404, "Snap instance not found.");
 
-    // Recupero la shape
-    const snapInstanceShape = await SnapsInstancesShapes.query()
-      .whereNotDeleted()
-      .findById(instance.model.snapInstanceShapeId);
-    if (!snapInstanceShape) throw new HttpException(404, "Shape not found.");
-
     const clientAlreadyExists = await this.snapsInstances.findClientInInstance(
       key,
-      user.id
+      typedData.userId
     );
-    if (clientAlreadyExists)
-      throw new HttpException(
-        409,
-        "You are already part of this snap instance."
+    if (!clientAlreadyExists) {
+      await this.snapInstanceService.joinUserToSnapInstance(typedData);
+      // Lo aggiungo alla lista
+      await this.snapsInstances.addClientToInstance(
+        typedData.key,
+        typedData.userId,
+        client
       );
-
-    const timerStart = await this.snapInstanceService.joinUserToSnapInstance(
-      typedData
-    );
-
-    // Lo aggiungo alla lista
-    await this.snapsInstances.addClientToInstance(
-      typedData.key,
-      user.id,
-      client
-    );
-
-    if (timerStart) {
-      await this.snapsInstances.startTimer(typedData.key);
+    } else {
+      throw new HttpException(409, "You are already in this snap instance.");
     }
   }
 
-  public async LeaveSnapInstance(
-    data: any,
-    user: User | undefined,
-    device: Device | undefined,
-    client: ExtWebSocket
-  ): Promise<Map<number, ExtWebSocket>> {
-    if (!data) throw new HttpException(400, "Data is missing.");
-    if (!user || !device) throw new HttpException(401, "Unauthorized");
+  public async LeaveSnapInstance(client: ExtWebSocket): Promise<void> {
+    if (!client.user || !client.device)
+      throw new HttpException(401, "Unauthorized");
     if (!client.snapsInstanceKey) throw new HttpException(400, "Bad request");
-
-    const typedData = data as LeaveUserToSnapInstanceDto;
-    if (!typedData.key) throw new HttpException(400, "Bad request");
-
-    const key = typedData.key;
-    typedData.userId = user.id;
-
-    // Controllo se esiste già un'istanza con la stessa chiave nelle SnapInstances
-    const instance = await this.snapsInstances.findInstanceByKey(key);
-    if (!instance) throw new HttpException(404, "Snap instance not found.");
-
-    // Recupero la shape
-    const snapInstanceShape = await SnapsInstancesShapes.query()
-      .whereNotDeleted()
-      .findById(instance.model.snapInstanceShapeId);
-    if (!snapInstanceShape) throw new HttpException(404, "Shape not found.");
-
-    const clientAlreadyExists = await this.snapsInstances.findClientInInstance(
-      key,
-      user.id
-    );
-    if (!clientAlreadyExists)
-      throw new HttpException(409, "You are not part of this snap instance.");
-
-    await this.snapInstanceService.leaveUserFromSnapInstance(typedData);
-
-    // Recupero i client connessi prima di eliminare l'istanza
-    const clients = await this.snapsInstances.findClientsInInstance(key);
-
-    // Se un utente lascio lo snap allora posso eliminare l'istanza, poichè l'utente non potrà più rientrare
-    this.snapsInstances.deleteInstance(key);
-
-    return clients;
-  }
-
-  public async GetSnapInstanceClients(
-    user: User | undefined,
-    device: Device | undefined,
-    client: ExtWebSocket
-  ): Promise<Map<number, ExtWebSocket>> {
-    if (!user || !device) throw new HttpException(401, "Unauthorized", null);
-    if (!client.snapsInstanceKey)
-      throw new HttpException(400, "Bad request", null);
 
     const key = client.snapsInstanceKey;
 
-    const snapInstance = await this.findSnapInstanceByKey(key);
-    if (!snapInstance)
-      throw new HttpException(404, "Snap instance not found.", null);
+    // Controllo se esiste già un'istanza con la stessa chiave nelle SnapInstances
+    const instance = await this.snapsInstances.findInstanceByKey(key);
+    if (!instance) throw new HttpException(404, "Snap instance not found.");
 
-    // Controllo se l'utente fa parte della snap instance
     const clientAlreadyExists = await this.snapsInstances.findClientInInstance(
       key,
-      user.id
+      client.user.id
     );
-    if (!clientAlreadyExists) {
-      throw new HttpException(401, "Unauthorized", null);
-    }
+    if (!clientAlreadyExists)
+      throw new HttpException(403, "You are not part of this snap instance.");
+
+    const data: LeaveUserToSnapInstanceDto = {
+      key: key,
+      userId: client.user.id,
+    };
+
+    await this.snapInstanceService.leaveUserFromSnapInstance(data);
+
+    // Se un utente lascio lo snap allora posso eliminare l'istanza, poichè lo snap non può essere più sincronizzato
+    this.snapsInstances.deleteInstance(key);
+  }
+
+  public async GetSnapInstanceClients(
+    key: string
+  ): Promise<Map<number, ExtWebSocket>> {
+    const snapInstance = await this.snapInstanceService.findSnapInstanceByKey(
+      key
+    );
 
     // Recupero i client connessi
-    const clients = await this.snapsInstances.findClientsInInstance(key);
+    const clients = await this.snapsInstances.findClientsInInstance(
+      snapInstance.instanceKey
+    );
 
     return clients;
   }
 
-  public async GetSnapInstance(
-    key: string,
-    user: User | undefined
-  ): Promise<{
+  public async GetSnapInstance(key: string): Promise<{
     id: number;
     key: string;
     title: string;
@@ -390,25 +309,16 @@ class SnapsInstancesController {
       minutes: number;
     };
   }> {
-    if (!user) throw new HttpException(401, "Unauthorized");
-    const instance = await this.findSnapInstanceByKey(key);
-    if (!instance)
-      throw new HttpException(404, "Snap instance not found.", null);
-
-    const shape = await SnapsInstancesShapes.query()
-      .whereNotDeleted()
-      .findById(instance.snapInstanceShapeId);
-    if (!shape) throw new HttpException(404, "Shape not found.", null);
+    const instance = await this.snapInstanceService.findSnapInstanceByKey(key);
+    const shape = await this.snapShapeService.findShapShapeById(
+      instance.snapShapeId
+    );
 
     // Recupero tutti gli utenti che fanno parte della snap instance
-    const snapInstanceUsers = await SnapsInstancesUsers.query()
-      .whereNotDeleted()
-      .where({ snapInstanceId: instance.id });
-    const filteredSnapInstanceUsers = snapInstanceUsers.filter(
-      (snapInstanceUser) => {
-        return snapInstanceUser.userId !== user.id;
-      }
-    );
+    const snapInstanceUsers =
+      await this.snapInstanceUserService.findSnapsInstancesUsersBySnapInstanceId(
+        instance.id
+      );
 
     let users: Array<{
       id: number;
@@ -418,36 +328,33 @@ class SnapsInstancesController {
 
     await Promise.all(
       snapInstanceUsers.map(async (snapInstanceUser) => {
-        let position = await SnapsInstancesShapesPositions.query()
-          .whereNotDeleted()
-          .findById(snapInstanceUser.snapInstanceShapePositionId);
-        if (position) {
-          let isJoined = await this.snapsInstances.findClientInInstance(
-            key,
-            snapInstanceUser.userId
+        let position =
+          await this.snapShapePositionService.findSnapShapePositionById(
+            snapInstanceUser.snapShapePositionId
           );
-          users.push({
-            id: snapInstanceUser.userId,
-            position: position.name,
-            isJoined: isJoined ? true : false,
-          });
-        }
+
+        let isJoined = await this.snapsInstances.findClientInInstance(
+          key,
+          snapInstanceUser.userId
+        );
+        users.push({
+          id: snapInstanceUser.userId,
+          position: position.name,
+          isJoined: isJoined ? true : false,
+        });
       })
     );
 
     let start = boolean(instance.timerStarted);
     let title = "";
     if (start) {
-      if (filteredSnapInstanceUsers.length === 1) {
+      if (snapInstanceUsers.length - 1 === 1) {
         // Significa che sono il creatore della snap instance ed un suo amico
-        let findUser = await Users.query()
-          .whereNotDeleted()
-          .findById(filteredSnapInstanceUsers[0].userId);
-        if (findUser) {
-          title = `You and ${findUser.username} sync in {countdown}`;
-        }
+        title = `You and {{username}} sync in {{timer}}`;
       } else {
-        title = `You and ${filteredSnapInstanceUsers.length} friends sync in {countdown}`;
+        title = `You and ${
+          snapInstanceUsers.length - 1
+        } friends sync in {{timer}}`;
       }
     } else {
       title = "Wait your friends...";
@@ -470,10 +377,7 @@ class SnapsInstancesController {
     };
   }
 
-  public async ConnectionClosed(
-    client: ExtWebSocket,
-    user: User
-  ): Promise<{
+  public async ConnectionClosed(client: ExtWebSocket): Promise<{
     key: string;
     clients: Map<number, ExtWebSocket>;
     message: SystemMessage;
@@ -484,21 +388,16 @@ class SnapsInstancesController {
       message: SystemMessage;
     } | null = null;
 
-    if (client.snapsInstanceKey) {
+    if (client.snapsInstanceKey && client.user) {
       // Controllo se esiste già un'istanza con la stessa chiave
       const instance = await this.snapsInstances.findInstanceByKey(
         client.snapsInstanceKey
       );
       if (instance) {
-        // Elimino l'istanza e mando il messaggio a tutti i client connessi
-
-        // Elimino i SnapInstanceUsers
-        await SnapsInstancesUsers.query()
-          .where({ snapInstanceId: instance.model.id })
-          .delete();
-
-        // Elimino l'istanza dal DB
-        await SnapsInstances.query().deleteById(instance.model.id);
+        await this.snapInstanceService.deleteSnapInstanceFromKey(
+          instance.model.userId,
+          instance.model.instanceKey
+        );
 
         // Recupero i client connessi prima di eliminare l'istanza
         const clients = await this.snapsInstances.findClientsInInstance(
@@ -508,54 +407,37 @@ class SnapsInstancesController {
         // La elimino
         await this.snapsInstances.deleteInstance(client.snapsInstanceKey);
 
-        if (instance.model.userId === user.id) {
-          response = {
-            key: client.snapsInstanceKey,
-            clients: clients,
-            message: {
-              message: `The instance has been deleted because the owner left`,
-              action: "DELETE_SNAP_INSTANCE",
-              data: {
-                key: client.snapsInstanceKey,
-
-                exit: true,
-              },
-              success: true,
-              isBroadcast: false,
-              sender: "NS",
+        response = {
+          key: client.snapsInstanceKey,
+          clients: clients,
+          message: {
+            message: `The instance has been deleted because the ${client.user.username} has disconnected.`,
+            action: "DELETE_SNAP_INSTANCE",
+            data: {
+              key: client.snapsInstanceKey,
+              exit: true,
             },
-          };
-        } else {
-          response = {
-            key: client.snapsInstanceKey,
-            clients: clients,
-            message: {
-              message: `${user.username} left the instance`,
-              action: "LEAVE_SNAP_INSTANCE",
-              data: {
-                key: client.snapsInstanceKey,
-                exit: true, // Servirà perchè poi dal front-end forzo l'uscita dalla schermata
-              },
-              success: true,
-              isBroadcast: false,
-              sender: "NS",
-            },
-          };
-        }
+            success: true,
+            isBroadcast: false,
+            sender: "NS",
+          },
+        };
       }
     }
 
     return response;
   }
 
-  private async findSnapInstanceByKey(
-    key: string
-  ): Promise<SnapsInstances | undefined> {
-    let hashedKey = this.snapInstanceService.hashSnapInstanceKey(key);
-    const findOne = await SnapsInstances.query()
-      .whereNotDeleted()
-      .findOne({ hashedKey: hashedKey });
-    return findOne;
+  public async DeleteSnapInstanceSystem(key: string): Promise<void> {
+    const instance = await this.snapInstanceService.findSnapInstanceByKey(key);
+
+    await this.snapInstanceService.deleteSnapInstanceFromKey(
+      instance.userId,
+      key
+    );
+
+    // La elimino
+    await this.snapsInstances.deleteInstance(key);
   }
 }
 
