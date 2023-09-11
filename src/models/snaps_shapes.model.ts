@@ -16,6 +16,11 @@ export class SnapsShapes extends softDelete(Model) implements SnapShape {
 
   iconKey!: string;
   focusedIconKey!: string;
+  columns!: number;
+  rows!: number;
+  spacing!: number;
+  width!: number;
+  height!: number;
 
   createdAt!: Date;
   updatedAt!: Date;

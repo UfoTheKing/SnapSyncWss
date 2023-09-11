@@ -17,6 +17,9 @@ export class SnapsShapesPositions
   snapShapeId!: number;
   name!: string;
 
+  width!: number;
+  height!: number;
+
   createdAt!: Date;
   updatedAt!: Date;
   deletedAt!: Date | null;

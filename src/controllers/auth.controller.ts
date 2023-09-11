@@ -4,7 +4,6 @@ import {
   WEBSOCKET_SECRET_IV,
   WEBSOCKET_SECRET_KEY,
 } from "@/config";
-import { LoginData, LoginSystemData } from "@/datas/auth.data";
 import { HttpException } from "@/exceptions/HttpException";
 import { Device } from "@/interfaces/devices.interface";
 import { User } from "@/interfaces/users.interface";
@@ -12,13 +11,14 @@ import { Devices } from "@/models/devices.model";
 import { Users } from "@/models/users.model";
 import { UsersDevices } from "@/models/users_devices.model";
 import { WebsocketClients } from "@/models/websocket_clients.model";
-import { ExtWebSocket } from "@/server";
 import { verify } from "jsonwebtoken";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import { WebsocketTokens } from "@/models/websocket_tokens.model";
 import DeviceService from "@/services/devices.service";
 import WebsocketClientService from "@/services/websocket_clients.service";
+import { ExtWebSocket } from "@/interfaces/wss.interface";
+import { LoginDto, LoginSystemDto } from "@/dtos/auth.dto";
 
 export interface DataStoredInToken {
   id: number;
@@ -56,7 +56,7 @@ class AuthController {
   public deviceService = new DeviceService();
   public websocketClientService = new WebsocketClientService();
 
-  public async login(data: LoginData): Promise<{
+  public async login(data: LoginDto): Promise<{
     user: User;
     device: Device;
     sessionId: string;
@@ -134,7 +134,7 @@ class AuthController {
     }
   }
 
-  public async loginSystem(data: LoginSystemData): Promise<void> {
+  public async loginSystem(data: LoginSystemDto): Promise<void> {
     if (!WEBSOCKET_ALGORITHM || !WEBSOCKET_SECRET_KEY || !WEBSOCKET_SECRET_IV) {
       throw new HttpException(500, "Websocket secret not found");
     }

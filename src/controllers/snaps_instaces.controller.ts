@@ -1,8 +1,3 @@
-import { Device } from "@/interfaces/devices.interface";
-import { User } from "@/interfaces/users.interface";
-import { SnapsInstances } from "@/models/snaps_instances.model";
-import { SnapsInstancesUsers } from "@/models/snaps_instances_users.model";
-import { ExtWebSocket, SystemMessage } from "@/server";
 import * as yup from "yup";
 import { HttpException } from "@/exceptions/HttpException";
 import { boolean } from "boolean";
@@ -16,6 +11,8 @@ import {
 import SnapShapeService from "@/services/snaps_shapes.service";
 import SnapInstanceUserService from "@/services/snaps_instances_users.service";
 import SnapShapePositionService from "@/services/snaps_shapes_positions.service";
+import ExpoService from "@/services/expo.service";
+import { ExtWebSocket, SystemMessage } from "@/interfaces/wss.interface";
 
 class ClassSnapInstance {
   public key: string;
@@ -141,6 +138,7 @@ class SnapsInstancesController {
   public snapShapeService = new SnapShapeService();
   public snapInstanceUserService = new SnapInstanceUserService();
   public snapShapePositionService = new SnapShapePositionService();
+  public expoService = new ExpoService();
 
   public async CreateSnapInstance(
     data: any,
@@ -190,24 +188,28 @@ class SnapsInstancesController {
       client
     );
 
+    // Invio la notifica a tutti gli utenti, tranne a me stesso
+    let usersIds = typedData.users.map((item) => item.id);
+    await this.expoService.sendSnapSyncNotification(key, usersIds, client.user);
+
     return key;
   }
 
-  public async DeleteSnapInstance(client: ExtWebSocket): Promise<void> {
-    if (!client.user || !client.device)
-      throw new HttpException(401, "Unauthorized");
-    if (!client.snapsInstanceKey) throw new HttpException(400, "Bad request");
+  // public async DeleteSnapInstance(client: ExtWebSocket): Promise<void> {
+  //   if (!client.user || !client.device)
+  //     throw new HttpException(401, "Unauthorized");
+  //   if (!client.snapsInstanceKey) throw new HttpException(400, "Bad request");
 
-    const key = client.snapsInstanceKey;
+  //   const key = client.snapsInstanceKey;
 
-    await this.snapInstanceService.deleteSnapInstanceFromKey(
-      client.user.id,
-      key
-    );
+  //   await this.snapInstanceService.deleteSnapInstanceFromKey(
+  //     client.user.id,
+  //     key
+  //   );
 
-    // La elimino
-    await this.snapsInstances.deleteInstance(key);
-  }
+  //   // La elimino
+  //   await this.snapsInstances.deleteInstance(key);
+  // }
 
   public async JoinSnapInstance(
     data: any,

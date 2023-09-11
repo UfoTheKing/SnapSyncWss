@@ -4,13 +4,18 @@ import * as http from "http";
 import { NODE_ENV, PORT } from "@config";
 import { Model } from "objection";
 import knex from "@databases";
-import { User } from "@/interfaces/users.interface";
 import SnapsInstancesController from "./controllers/snaps_instaces.controller";
-import { LoginData, LoginSystemData } from "./datas/auth.data";
-import { Device } from "./interfaces/devices.interface";
 import AuthController from "./controllers/auth.controller";
 import * as yup from "yup";
 import { HttpException } from "./exceptions/HttpException";
+import {
+  ExtWebSocket,
+  SystemErrorMessage,
+  SystemMessage,
+  UserMessage,
+} from "./interfaces/wss.interface";
+import { LoginDto, LoginSystemDto } from "./dtos/auth.dto";
+import { WssActions } from "./utils/enum";
 
 const app = express();
 const server = http.createServer(app);
@@ -19,18 +24,6 @@ Model.knex(knex);
 
 //initialize the WebSocket server instance
 const wss = new WebSocket.Server({ server });
-
-export interface ExtWebSocket extends WebSocket {
-  isAlive: boolean;
-
-  system?: boolean;
-  token?: string;
-
-  snapsInstanceKey?: string;
-  user?: User;
-  device?: Device;
-  sessionId?: string;
-}
 
 function createMessage(
   success: boolean,
@@ -66,39 +59,6 @@ function createErrorMessage(
   );
 }
 
-export class SystemMessage {
-  constructor(
-    public success: boolean,
-    public message: string,
-    public action: string | null = null,
-    public data: any = null,
-
-    public isBroadcast = false,
-    public sender = "NS"
-  ) {}
-}
-
-export class SystemErrorMessage {
-  constructor(
-    public success: boolean,
-    public message: string,
-    public action: string | null = null,
-    public data: any = null,
-    public code: number = 500,
-    public isBroadcast = false,
-    public sender = "NS"
-  ) {}
-}
-
-export class UserMessage {
-  constructor(
-    public action: string,
-    public token?: string,
-    public deviceUuid?: string,
-    public data?: any
-  ) {}
-}
-
 const controller = new SnapsInstancesController();
 const authController = new AuthController();
 
@@ -113,18 +73,18 @@ wss.on("connection", (ws: WebSocket) => {
 
   //connection is up, let's add a simple simple event
   ws.on("message", async (msg: string) => {
-    var action = "GENERIC";
+    var action = WssActions.GENERIC;
     try {
       const message = JSON.parse(msg) as UserMessage;
       if (!message.action) throw new Error("No action provided");
       // if (!message.token) throw new Error("No token provided");
 
       switch (message.action) {
-        case "LOGIN": {
+        case WssActions.LOGIN: {
+          action = WssActions.LOGIN;
           if (!message.deviceUuid) throw new HttpException(401, "Unauthorized");
           if (!message.token) throw new HttpException(401, "Unauthorized");
 
-          action = "LOGIN";
           // Controllo se è già loggato
           const isLogged = await authController.isLogged(
             message.token,
@@ -132,13 +92,15 @@ wss.on("connection", (ws: WebSocket) => {
           );
           if (isLogged) throw new Error("User already logged");
 
-          const data: LoginData = {
+          const data: LoginDto = {
             token: message.token,
             deviceUuid: message.deviceUuid,
             extWs: extWs,
           };
 
           const { user, device, sessionId } = await authController.login(data);
+
+          console.log(`Client connected - ${user.username} connected now`);
 
           extWs.user = user;
           extWs.device = device;
@@ -149,15 +111,17 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "LOGIN_SYSTEM": {
-          action = "LOGIN_SYSTEM";
+        case WssActions.LOGIN_SYSTEM: {
+          action = WssActions.LOGIN_SYSTEM;
           if (!message.token) throw new HttpException(401, "Unauthorized");
 
-          let data: LoginSystemData = {
+          let data: LoginSystemDto = {
             token: message.token,
             extWs: extWs,
           };
           await authController.loginSystem(data);
+
+          console.log(`Client connected - System connected now`);
 
           extWs.system = true;
           extWs.token = message.token;
@@ -166,8 +130,8 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "GET_CONNECTED_USERS": {
-          action = "GET_CONNECTED_USERS";
+        case WssActions.GET_CONNECTED_USERS: {
+          action = WssActions.GET_CONNECTED_USERS;
           // const isLogged = await authController.isLogged(
           //   message.token,
           //   message.deviceUuid
@@ -187,8 +151,49 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "CREATE_SNAP_INSTANCE": {
-          action = "CREATE_SNAP_INSTANCE";
+        case WssActions.LOGOUT: {
+          action = WssActions.LOGOUT;
+          if (!extWs.device) throw new HttpException(401, "Unauthorized");
+          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+
+          const isLogged = await authController.isLogged(
+            extWs.token,
+            extWs.device.uuid
+          );
+          if (!isLogged) throw new HttpException(401, "Unauthorized");
+
+          if (extWs.system) console.log("System disconnected");
+          else {
+            if (extWs.user) console.log(`${extWs.user.username} disconnected`);
+
+            const r = await controller.ConnectionClosed(extWs);
+
+            if (r) {
+              let clientsArray = Array.from(r.clients);
+              clientsArray.forEach((client) => {
+                let clientWs = client[1];
+                clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+                clientWs.send(JSON.stringify(r.message));
+              });
+            }
+
+            // Lo rimuovo dalla mappa
+            await authController.logout(extWs);
+          }
+
+          extWs.user = undefined;
+          extWs.device = undefined;
+          extWs.sessionId = undefined;
+          extWs.snapsInstanceKey = undefined;
+          extWs.system = undefined;
+          extWs.token = undefined;
+
+          ws.send(createMessage(true, "User logged out", action));
+          break;
+        }
+
+        case WssActions.CREATE_SNAP_INSTANCE: {
+          action = WssActions.CREATE_SNAP_INSTANCE;
           if (!extWs.device) throw new HttpException(401, "Unauthorized");
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
           const isLogged = await authController.isLogged(
@@ -220,47 +225,47 @@ wss.on("connection", (ws: WebSocket) => {
           // ws.send(createMessage(true, "Snap instance created"));
           break;
         }
-        case "DELETE_SNAP_INSTANCE": {
-          action = "DELETE_SNAP_INSTANCE";
-          if (!extWs.device) throw new HttpException(401, "Unauthorized");
-          if (!extWs.token) throw new HttpException(401, "Unauthorized");
+        // case WssActions.DELETE_SNAP_INSTANCE: {
+        //   action = WssActions.DELETE_SNAP_INSTANCE;
+        //   if (!extWs.device) throw new HttpException(401, "Unauthorized");
+        //   if (!extWs.token) throw new HttpException(401, "Unauthorized");
 
-          const isLogged = await authController.isLogged(
-            extWs.token,
-            extWs.device.uuid
-          );
-          if (!isLogged) throw new HttpException(401, "Unauthorized");
+        //   const isLogged = await authController.isLogged(
+        //     extWs.token,
+        //     extWs.device.uuid
+        //   );
+        //   if (!isLogged) throw new HttpException(401, "Unauthorized");
 
-          if (!extWs.snapsInstanceKey)
-            throw new HttpException(403, "Forbidden");
+        //   if (!extWs.snapsInstanceKey)
+        //     throw new HttpException(403, "Forbidden");
 
-          let copyOfYheKey = extWs.snapsInstanceKey;
+        //   let copyOfYheKey = extWs.snapsInstanceKey;
 
-          const clients = await controller.GetSnapInstanceClients(
-            extWs.snapsInstanceKey
-          );
+        //   const clients = await controller.GetSnapInstanceClients(
+        //     extWs.snapsInstanceKey
+        //   );
 
-          await controller.DeleteSnapInstance(extWs);
+        //   await controller.DeleteSnapInstance(extWs);
 
-          const clientsArray = Array.from(clients);
+        //   const clientsArray = Array.from(clients);
 
-          extWs.snapsInstanceKey = undefined;
+        //   extWs.snapsInstanceKey = undefined;
 
-          clientsArray.forEach((client) => {
-            let clientWs = client[1];
-            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
-            clientWs.send(
-              createMessage(true, `SnapSync deleted`, "DELETE_SNAP_INSTANCE", {
-                key: copyOfYheKey,
-                exit: true,
-              })
-            );
-          });
+        //   clientsArray.forEach((client) => {
+        //     let clientWs = client[1];
+        //     clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+        //     clientWs.send(
+        //       createMessage(true, `SnapSync deleted`, "DELETE_SNAP_INSTANCE", {
+        //         key: copyOfYheKey,
+        //         exit: true,
+        //       })
+        //     );
+        //   });
 
-          break;
-        }
-        case "JOIN_SNAP_INSTANCE": {
-          action = "JOIN_SNAP_INSTANCE";
+        //   break;
+        // }
+        case WssActions.JOIN_SNAP_INSTANCE: {
+          action = WssActions.JOIN_SNAP_INSTANCE;
           if (!extWs.device) throw new HttpException(401, "Unauthorized");
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
 
@@ -290,8 +295,8 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "LEAVE_SNAP_INSTANCE": {
-          action = "LEAVE_SNAP_INSTANCE";
+        case WssActions.LEAVE_SNAP_INSTANCE: {
+          action = WssActions.LEAVE_SNAP_INSTANCE;
           if (!extWs.device) throw new HttpException(401, "Unauthorized");
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
 
@@ -327,8 +332,8 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "SEND_SNAP": {
-          action = "SEND_SNAP";
+        case WssActions.SEND_SNAP: {
+          action = WssActions.SEND_SNAP;
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
           if (!extWs.system) throw new HttpException(401, "Unauthorized");
           if (!message.data) throw new HttpException(400, "Bad request");
@@ -364,8 +369,8 @@ wss.on("connection", (ws: WebSocket) => {
 
           break;
         }
-        case "ERROR_SNAP": {
-          action = "ERROR_SNAP";
+        case WssActions.ERROR_SNAP: {
+          action = WssActions.ERROR_SNAP;
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
           if (!extWs.system) throw new HttpException(401, "Unauthorized");
           if (!message.data) throw new HttpException(400, "Bad request");
@@ -396,8 +401,8 @@ wss.on("connection", (ws: WebSocket) => {
             );
           });
         }
-        case "PUBLISH_SNAP": {
-          action = "PUBLISH_SNAP";
+        case WssActions.PUBLISH_SNAP: {
+          action = WssActions.PUBLISH_SNAP;
           if (!extWs.token) throw new HttpException(401, "Unauthorized");
           if (!extWs.system) throw new HttpException(401, "Unauthorized");
           if (!message.data) throw new HttpException(400, "Bad request");
@@ -465,7 +470,8 @@ wss.on("connection", (ws: WebSocket) => {
   ws.send(
     createMessage(
       true,
-      "Hi there, I am a WebSocket server. Use the next structure to communicate through the websocket channel."
+      "Hi there, I am a WebSocket server. Use the next structure to communicate through the websocket channel.",
+      "WSS_INFO"
     )
   );
 
@@ -476,24 +482,34 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", async (e) => {
     try {
-      const r = await controller.ConnectionClosed(extWs);
+      if (extWs.system) {
+        console.log("System disconnected - reason: " + e);
+      } else {
+        if (extWs.user) {
+          console.log(`${extWs.user.username} disconnected - reason: ` + e);
+        }
 
-      if (r) {
-        let clientsArray = Array.from(r.clients);
-        clientsArray.forEach((client) => {
-          let clientWs = client[1];
-          clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
-          clientWs.send(JSON.stringify(r.message));
-        });
+        const r = await controller.ConnectionClosed(extWs);
+
+        if (r) {
+          let clientsArray = Array.from(r.clients);
+          clientsArray.forEach((client) => {
+            let clientWs = client[1];
+            clientWs.snapsInstanceKey = undefined; // Rimuovo la chiave dai clients, in modo che possano entrare in altre snap
+            clientWs.send(JSON.stringify(r.message));
+          });
+        }
+
+        // Lo rimuovo dalla mappa
+        await authController.logout(extWs);
       }
-
-      // Lo rimuovo dalla mappa
-      await authController.logout(extWs);
 
       extWs.user = undefined;
       extWs.device = undefined;
       extWs.sessionId = undefined;
       extWs.snapsInstanceKey = undefined;
+      extWs.system = undefined;
+      extWs.token = undefined;
     } catch (error) {
       console.log(error);
     }

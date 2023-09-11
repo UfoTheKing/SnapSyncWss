@@ -14,16 +14,17 @@ export class SnapsInstancesUsers
   implements SnapInstanceUser
 {
   id!: number;
+  userId!: number;
   snapInstanceId!: number;
   snapShapePositionId!: number;
-  userId!: number;
+  locationId!: number | null;
 
   isOwner!: boolean;
-
-  imageKey!: string | null;
-
   isJoined!: boolean;
   joinedAt!: Date | null;
+
+  cdlPublicId!: string | null;
+  snappedAt!: Date | null;
 
   createdAt!: Date;
   updatedAt!: Date;
