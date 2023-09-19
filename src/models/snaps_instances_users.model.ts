@@ -23,6 +23,7 @@ export class SnapsInstancesUsers
   isJoined!: boolean;
   joinedAt!: Date | null;
 
+  s3Key!: string | null;
   cdlPublicId!: string | null;
   snappedAt!: Date | null;
 
