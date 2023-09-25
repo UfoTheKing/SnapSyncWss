@@ -2,7 +2,6 @@ export interface SnapInstanceUser {
   id: number;
   userId: number;
   snapInstanceId: number;
-  snapShapePositionId: number;
   locationId: number | null;
 
   isOwner: boolean;
@@ -10,7 +9,6 @@ export interface SnapInstanceUser {
   joinedAt: Date | null;
 
   s3Key: string | null;
-  cdlPublicId: string | null;
   snappedAt: Date | null;
 
   createdAt: Date;

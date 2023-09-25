@@ -1,10 +1,7 @@
 export interface CreateSnapInstanceUserDto {
   userId: number;
   snapInstanceId: number;
-  snapShapePositionId: number;
   isOwner: boolean;
-  isJoined?: boolean;
-  joinedAt?: Date;
 }
 
 export interface JoinUserToSnapInstanceDto {

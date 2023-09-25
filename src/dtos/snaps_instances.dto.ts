@@ -1,11 +1,3 @@
-export interface CreateSnapInstaceDto {
-  userId: number;
-  snapShapeId: number;
-
+export interface CreateSnapInstanceDto {
   key: string;
-
-  users: Array<{
-    id: number;
-    position: string;
-  }>;
 }
